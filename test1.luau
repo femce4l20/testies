@@ -1,57 +1,33 @@
 --[[
-    Recursive Roblox Server Hopper / Reinjector
+    Recursive Server Hopper
 
-    REQUIRED:
-        Set SCRIPT_URL to the raw URL containing THIS script.
-
-    CONFIG:
-        AUTO_REJOIN       = true
-        REJOIN_SAME_SERVER = false
-        recursive_execution = true
-
-    Behavior:
-        - Records the current JobId.
-        - Fetches public servers for the current place.
-        - Never selects a JobId already recorded.
-        - Never selects the current JobId when REJOIN_SAME_SERVER = false.
-        - Queues this script to execute automatically after teleport.
-        - Repeats until no unvisited public servers remain.
-        - When exhausted, destroys every BasePart in Workspace/game
-          and displays "done."
-
-    NOTE:
-        queue_on_teleport / syn.queue_on_teleport / fluxus.queue_on_teleport
-        are executor APIs and are NOT normal Roblox LocalScript APIs.
+    CONFIGURATION
 ]]
-
---//==============================================================
---// CONFIG
---//==============================================================
 
 local AUTO_REJOIN = true
 local REJOIN_SAME_SERVER = false
-
--- Set this to true to continue hopping/reinjecting repeatedly.
 local recursive_execution = true
 
--- Raw URL containing THIS exact script.
+-- IMPORTANT:
+-- Put the RAW URL of this script here.
 local SCRIPT_URL = "https://raw.githubusercontent.com/femce4l20/testies/refs/heads/main/test1.luau"
 
--- Number of server-list pages to inspect.
+-- Maximum number of public-server API pages to inspect.
 local MAX_SERVER_PAGES = 100
 
--- Small delay before looking for servers.
+-- Delay before starting.
 local INITIAL_DELAY = 1.5
 
--- Delay before teleporting.
+-- Delay immediately before teleporting.
 local TELEPORT_DELAY = 0.5
 
--- TeleportSetting key used to persist visited JobIds.
-local VISITED_SETTING = "RecursiveServerHop_Visited_v1"
+-- Persistent TeleportSetting key.
+local VISITED_SETTING = "RecursiveServerHop_Visited_v2"
 
---//==============================================================
---// SERVICES
---//==============================================================
+
+--==============================================================
+-- SERVICES
+--==============================================================
 
 local Players = game:GetService("Players")
 local TeleportService = game:GetService("TeleportService")
@@ -59,84 +35,129 @@ local HttpService = game:GetService("HttpService")
 
 local LocalPlayer = Players.LocalPlayer
 
---//==============================================================
---// EXECUTOR COMPATIBILITY
---//==============================================================
 
-local queueTeleport =
+--==============================================================
+-- EXECUTOR COMPATIBILITY
+--==============================================================
+
+local function missing(expectedType, value, fallback)
+    if type(value) == expectedType then
+        return value
+    end
+
+    return fallback
+end
+
+local syn = missing("table", syn, nil)
+local fluxus = missing("table", fluxus, nil)
+
+local queueteleport = missing(
+    "function",
     queue_on_teleport
-    or (syn and syn.queue_on_teleport)
-    or (fluxus and fluxus.queue_on_teleport)
+        or (syn and syn.queue_on_teleport)
+        or (fluxus and fluxus.queue_on_teleport)
+)
 
-local httpGet =
-    (function()
-        if game.HttpGet then
-            return function(url)
-                return game:HttpGet(url)
-            end
+
+--==============================================================
+-- HTTP COMPATIBILITY
+--==============================================================
+
+local function getHttp()
+    if type(game.HttpGet) == "function" then
+        return function(url)
+            return game:HttpGet(url)
         end
+    end
 
-        if request then
-            return function(url)
-                local response = request({
-                    Url = url,
-                    Method = "GET"
-                })
+    local requestFunction =
+        request
+        or http_request
+        or (syn and syn.request)
+        or (fluxus and fluxus.request)
 
-                if response and response.Body then
-                    return response.Body
-                end
+    if type(requestFunction) == "function" then
+        return function(url)
+            local response = requestFunction({
+                Url = url,
+                Method = "GET"
+            })
 
-                error("request() returned no response body")
+            if response and response.Body then
+                return response.Body
             end
+
+            error("HTTP request returned no body")
         end
+    end
 
-        error("No executor HTTP function is available.")
-    end)()
+    return nil
+end
 
---//==============================================================
---// BASIC VALIDATION
---//==============================================================
+local httpGet = getHttp()
+
+
+--==============================================================
+-- CONFIG VALIDATION
+--==============================================================
 
 if not AUTO_REJOIN then
-    warn("[RecursiveHop] AUTO_REJOIN is false. Stopping.")
+    warn("[RecursiveHop] AUTO_REJOIN = false")
     return
 end
 
-if SCRIPT_URL == "" or SCRIPT_URL:find("YOUR%-RAW%-SCRIPT%-URL") then
-    warn("[RecursiveHop] Configure SCRIPT_URL before using recursive execution.")
+if SCRIPT_URL == ""
+    or SCRIPT_URL:find("YOUR%-RAW%-SCRIPT%-URL") then
+
+    warn("[RecursiveHop] Set SCRIPT_URL before running.")
     return
 end
 
-if recursive_execution and not queueTeleport then
-    warn("[RecursiveHop] No queue_on_teleport-compatible executor function found.")
-    warn("[RecursiveHop] Supported examples: queue_on_teleport, syn.queue_on_teleport, fluxus.queue_on_teleport")
+if recursive_execution and not queueteleport then
+    warn("[RecursiveHop] queue_on_teleport is unavailable.")
+    warn("[RecursiveHop] Supported forms:")
+    warn("  queue_on_teleport")
+    warn("  syn.queue_on_teleport")
+    warn("  fluxus.queue_on_teleport")
+
     return
 end
 
---//==============================================================
---// PERSISTENT VISITED SERVER STATE
---//==============================================================
+
+--==============================================================
+-- PERSISTENT VISITED-SERVER STORAGE
+--==============================================================
 
 local visited = {}
 
 local function loadVisited()
-    local saved = TeleportService:GetTeleportSetting(VISITED_SETTING)
+    local ok, stored = pcall(function()
+        return TeleportService:GetTeleportSetting(VISITED_SETTING)
+    end)
 
-    if typeof(saved) == "table" then
-        for jobId, value in pairs(saved) do
-            if value then
+    if not ok then
+        warn("[RecursiveHop] Could not read teleport settings:", stored)
+        return
+    end
+
+    if typeof(stored) == "table" then
+        for jobId, value in pairs(stored) do
+            if value == true then
                 visited[tostring(jobId)] = true
             end
         end
-    elseif typeof(saved) == "string" then
-        local ok, decoded = pcall(function()
-            return HttpService:JSONDecode(saved)
+
+        return
+    end
+
+    if typeof(stored) == "string" and stored ~= "" then
+        local decodeOK, decoded = pcall(function()
+            return HttpService:JSONDecode(stored)
         end)
 
-        if ok and typeof(decoded) == "table" then
+        if decodeOK and typeof(decoded) == "table" then
             for jobId, value in pairs(decoded) do
-                if value then
+                if value == true then
                     visited[tostring(jobId)] = true
                 end
             end
@@ -145,7 +166,6 @@ local function loadVisited()
 end
 
 local function saveVisited()
-    -- Roblox teleport settings support string-keyed tables.
     local copy = {}
 
     for jobId, value in pairs(visited) do
@@ -155,27 +175,50 @@ local function saveVisited()
     end
 
     local ok, err = pcall(function()
-        TeleportService:SetTeleportSetting(VISITED_SETTING, copy)
+        TeleportService:SetTeleportSetting(
+            VISITED_SETTING,
+            copy
+        )
     end)
 
-    if not ok then
-        warn("[RecursiveHop] Failed to save visited server list:", err)
+    if ok then
+        return true
+    end
 
-        -- Fallback to JSON string.
-        pcall(function()
+    warn("[RecursiveHop] Table teleport setting failed:", err)
+
+    -- Fallback to a JSON string.
+    local encodedOK, encoded = pcall(function()
+        return HttpService:JSONEncode(copy)
+    end)
+
+    if encodedOK then
+        local fallbackOK, fallbackErr = pcall(function()
             TeleportService:SetTeleportSetting(
                 VISITED_SETTING,
-                HttpService:JSONEncode(copy)
+                encoded
             )
         end)
+
+        if fallbackOK then
+            return true
+        end
+
+        warn(
+            "[RecursiveHop] JSON teleport setting failed:",
+            fallbackErr
+        )
     end
+
+    return false
 end
 
 loadVisited()
 
---//==============================================================
---// CURRENT SERVER
---//==============================================================
+
+--==============================================================
+-- CURRENT SERVER
+--==============================================================
 
 local currentJobId = tostring(game.JobId)
 
@@ -183,83 +226,124 @@ if currentJobId ~= "" then
     visited[currentJobId] = true
     saveVisited()
 
-    print("[RecursiveHop] Current server:", currentJobId)
+    print("[RecursiveHop] Current JobId:", currentJobId)
 else
-    warn("[RecursiveHop] Current JobId is empty.")
+    warn("[RecursiveHop] game.JobId is empty.")
 end
 
---//==============================================================
---// TELEPORT QUEUE
---//==============================================================
 
-local function queueSelf()
-    if not queueTeleport then
-        return false
+--==============================================================
+-- AUTO REINJECTION
+--
+-- This intentionally follows the same structure as the
+-- Infinite Yield example:
+--
+-- local TeleportCheck = false
+-- Players.LocalPlayer.OnTeleport:Connect(function(State)
+--     if KeepInfYield and (not TeleportCheck) and queueteleport then
+--         TeleportCheck = true
+--         queueteleport("loadstring(...)()")
+--     end
+-- end)
+--
+--==============================================================
+
+local TeleportCheck = false
+
+Players.LocalPlayer.OnTeleport:Connect(function(State)
+
+    if not recursive_execution then
+        return
     end
 
-    -- Execute this same hosted script after the teleport.
-    local queuedCode = string.format([[
-        task.wait(1.5)
+    if TeleportCheck then
+        return
+    end
 
-        local success, err = pcall(function()
-            loadstring(game:HttpGet(%q))()
-        end)
+    if not queueteleport then
+        warn("[RecursiveHop] Missing queue_on_teleport.")
+        return
+    end
 
-        if not success then
-            warn("[RecursiveHop] Failed to reinject:", err)
-        end
-    ]], SCRIPT_URL)
+    TeleportCheck = true
+
+    local queuedLoader = string.format(
+        "loadstring(game:HttpGet(%q))()",
+        SCRIPT_URL
+    )
 
     local ok, err = pcall(function()
-        queueTeleport(queuedCode)
+        queueteleport(queuedLoader)
     end)
 
-    if not ok then
-        warn("[RecursiveHop] Failed to queue teleport script:", err)
-        return false
+    if ok then
+        print("[RecursiveHop] Script queued for next server.")
+    else
+        warn(
+            "[RecursiveHop] queue_on_teleport failed:",
+            err
+        )
     end
+end)
 
-    print("[RecursiveHop] Script queued for next server.")
-    return true
-end
 
---//==============================================================
---// SERVER API
---//==============================================================
+--==============================================================
+-- SERVER API
+--==============================================================
 
 local function fetchServers()
     local servers = {}
     local cursor = nil
 
+    if not httpGet then
+        warn("[RecursiveHop] No compatible HTTP function.")
+        return servers
+    end
+
     for page = 1, MAX_SERVER_PAGES do
+
         local url =
-            ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100"):format(
-                game.PlaceId
-            )
+            ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100")
+            :format(game.PlaceId)
 
         if cursor and cursor ~= "" then
-            url = url .. "&cursor=" .. HttpService:UrlEncode(cursor)
+            url = url
+                .. "&cursor="
+                .. HttpService:UrlEncode(cursor)
         end
 
         local body
 
-        local ok, err = pcall(function()
+        local requestOK, requestErr = pcall(function()
             body = httpGet(url)
         end)
 
-        if not ok then
-            warn("[RecursiveHop] Server API request failed:", err)
+        if not requestOK then
+            warn(
+                "[RecursiveHop] Server request failed:",
+                requestErr
+            )
+
             break
         end
 
         local data
 
-        ok, err = pcall(function()
+        local decodeOK, decodeErr = pcall(function()
             data = HttpService:JSONDecode(body)
         end)
 
-        if not ok or typeof(data) ~= "table" then
-            warn("[RecursiveHop] Invalid server API response.")
+        if not decodeOK then
+            warn(
+                "[RecursiveHop] Failed to decode server response:",
+                decodeErr
+            )
+
+            break
+        end
+
+        if typeof(data) ~= "table" then
+            warn("[RecursiveHop] Server response was not a table.")
             break
         end
 
@@ -281,169 +365,244 @@ local function fetchServers()
     return servers
 end
 
---//==============================================================
---// SELECT UNVISITED SERVER
---//==============================================================
+
+--==============================================================
+-- FIND AN UNVISITED SERVER
+--==============================================================
 
 local function chooseServer()
     local servers = fetchServers()
 
-    print("[RecursiveHop] Servers discovered:", #servers)
-    print("[RecursiveHop] Visited servers:", table.getn and "tracked" or "")
+    print(
+        "[RecursiveHop] Server entries found:",
+        #servers
+    )
 
     local candidates = {}
+    local fallbackCandidates = {}
 
     for _, server in ipairs(servers) do
+
         local jobId = tostring(server.id)
 
-        local isCurrent = jobId == currentJobId
-        local alreadyVisited = visited[jobId] == true
+        local isCurrentServer =
+            jobId == currentJobId
 
-        local canUse =
-            not alreadyVisited
+        local wasVisited =
+            visited[jobId] == true
+
+        if not wasVisited
             and (
                 REJOIN_SAME_SERVER
-                or not isCurrent
+                or not isCurrentServer
+            ) then
+
+            table.insert(
+                fallbackCandidates,
+                server
             )
 
-        -- Prefer servers that aren't full.
-        if canUse then
-            local playing = tonumber(server.playing) or 0
-            local maxPlayers = tonumber(server.maxPlayers) or 0
+            local playing =
+                tonumber(server.playing) or 0
 
-            if maxPlayers <= 0 or playing < maxPlayers then
-                table.insert(candidates, server)
+            local maxPlayers =
+                tonumber(server.maxPlayers) or 0
+
+            if maxPlayers <= 0
+                or playing < maxPlayers then
+
+                table.insert(
+                    candidates,
+                    server
+                )
             end
         end
     end
 
-    -- No normal candidates: perform a second pass that ignores player count,
-    -- but still respects visited/current-server rules.
-    if #candidates == 0 then
-        for _, server in ipairs(servers) do
-            local jobId = tostring(server.id)
-
-            local isCurrent = jobId == currentJobId
-            local alreadyVisited = visited[jobId] == true
-
-            if not alreadyVisited and (REJOIN_SAME_SERVER or not isCurrent) then
-                table.insert(candidates, server)
-            end
-        end
+    -- Prefer non-full servers.
+    if #candidates > 0 then
+        return candidates[
+            math.random(1, #candidates)
+        ]
     end
 
-    if #candidates == 0 then
-        return nil
+    -- If all available servers looked full,
+    -- still try any unvisited server.
+    if #fallbackCandidates > 0 then
+        return fallbackCandidates[
+            math.random(
+                1,
+                #fallbackCandidates
+            )
+        ]
     end
 
-    -- Pick randomly from the remaining unvisited servers.
-    local selected = candidates[math.random(1, #candidates)]
-
-    return selected
+    return nil
 end
 
---//==============================================================
---// DONE UI
---//==============================================================
+
+--==============================================================
+-- DONE UI
+--==============================================================
 
 local function showDone()
-    local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    local PlayerGui =
+        LocalPlayer:FindFirstChildOfClass(
+            "PlayerGui"
+        )
 
-    if not playerGui then
-        warn("[RecursiveHop] PlayerGui not available.")
+    if not PlayerGui then
+        warn("[RecursiveHop] PlayerGui unavailable.")
         return
     end
 
-    local old = playerGui:FindFirstChild("RecursiveHopDone")
+    local old =
+        PlayerGui:FindFirstChild(
+            "RecursiveHopDone"
+        )
 
     if old then
         old:Destroy()
     end
 
-    local gui = Instance.new("ScreenGui")
-    gui.Name = "RecursiveHopDone"
-    gui.ResetOnSpawn = false
-    gui.IgnoreGuiInset = true
-    gui.DisplayOrder = 999999
+    local ScreenGui =
+        Instance.new("ScreenGui")
 
-    local background = Instance.new("Frame")
-    background.Size = UDim2.fromScale(1, 1)
-    background.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-    background.BackgroundTransparency = 0.15
-    background.BorderSizePixel = 0
-    background.Parent = gui
+    ScreenGui.Name =
+        "RecursiveHopDone"
 
-    local label = Instance.new("TextLabel")
-    label.AnchorPoint = Vector2.new(0.5, 0.5)
-    label.Position = UDim2.fromScale(0.5, 0.5)
-    label.Size = UDim2.fromScale(0.8, 0.2)
+    ScreenGui.ResetOnSpawn =
+        false
 
-    label.BackgroundTransparency = 1
+    ScreenGui.IgnoreGuiInset =
+        true
 
-    label.Text = "done."
-    label.TextColor3 = Color3.fromRGB(255, 255, 255)
-    label.TextScaled = true
-    label.Font = Enum.Font.GothamBold
+    ScreenGui.DisplayOrder =
+        2147483647
 
-    label.Parent = background
-    gui.Parent = playerGui
+    local Background =
+        Instance.new("Frame")
+
+    Background.Name =
+        "Background"
+
+    Background.Size =
+        UDim2.fromScale(1, 1)
+
+    Background.Position =
+        UDim2.fromScale(0, 0)
+
+    Background.BorderSizePixel =
+        0
+
+    Background.BackgroundColor3 =
+        Color3.fromRGB(0, 0, 0)
+
+    Background.BackgroundTransparency =
+        0.15
+
+    Background.Parent =
+        ScreenGui
+
+    local Label =
+        Instance.new("TextLabel")
+
+    Label.Name =
+        "Done"
+
+    Label.AnchorPoint =
+        Vector2.new(0.5, 0.5)
+
+    Label.Position =
+        UDim2.fromScale(0.5, 0.5)
+
+    Label.Size =
+        UDim2.fromScale(0.8, 0.2)
+
+    Label.BackgroundTransparency =
+        1
+
+    Label.Text =
+        "done."
+
+    Label.TextColor3 =
+        Color3.fromRGB(255, 255, 255)
+
+    Label.TextScaled =
+        true
+
+    Label.Font =
+        Enum.Font.GothamBold
+
+    Label.Parent =
+        Background
+
+    ScreenGui.Parent =
+        PlayerGui
 end
 
---//==============================================================
---// DESTROY ALL PARTS
---//==============================================================
+
+--==============================================================
+-- DELETE EVERY PART
+--==============================================================
 
 local function destroyEveryPart()
+    local descendants =
+        game:GetDescendants()
+
     local destroyed = 0
 
-    -- Snapshot first so destruction does not interfere with iteration.
-    local descendants = game:GetDescendants()
-
     for _, instance in ipairs(descendants) do
+
         if instance:IsA("BasePart") then
+
             pcall(function()
                 instance:Destroy()
                 destroyed += 1
             end)
+
         end
     end
 
-    -- Also clear terrain if present.
+    -- Clear Terrain separately.
     pcall(function()
-        local terrain = workspace:FindFirstChildOfClass("Terrain")
+        local terrain =
+            workspace:FindFirstChildOfClass(
+                "Terrain"
+            )
 
         if terrain then
             terrain:Clear()
         end
     end)
 
-    print("[RecursiveHop] Destroyed BaseParts:", destroyed)
+    print(
+        "[RecursiveHop] Destroyed parts:",
+        destroyed
+    )
 end
 
---//==============================================================
---// MAIN
---//==============================================================
 
-task.wait(INITIAL_DELAY)
+--==============================================================
+-- TELEPORT TO NEXT SERVER
+--==============================================================
 
--- Non-recursive mode:
--- simply move to one different server and stop.
-if not recursive_execution then
-    local target = chooseServer()
-
-    if not target then
-        print("[RecursiveHop] No new server available.")
-        destroyEveryPart()
-        showDone()
-        return
+local function teleportToServer(server)
+    if not server or not server.id then
+        return false
     end
 
-    local targetJobId = tostring(target.id)
+    local targetJobId =
+        tostring(server.id)
 
+    -- Prevent this target from being chosen again.
     visited[targetJobId] = true
     saveVisited()
 
-    print("[RecursiveHop] Teleporting once to:", targetJobId)
+    print(
+        "[RecursiveHop] Target server:",
+        targetJobId
+    )
 
     task.wait(TELEPORT_DELAY)
 
@@ -456,67 +615,95 @@ if not recursive_execution then
     end)
 
     if not ok then
-        warn("[RecursiveHop] Teleport failed:", err)
+        warn(
+            "[RecursiveHop] Teleport failed:",
+            err
+        )
+
+        return false
     end
+
+    return true
+end
+
+
+--==============================================================
+-- MAIN
+--==============================================================
+
+task.wait(INITIAL_DELAY)
+
+
+--==============================================================
+-- NON-RECURSIVE MODE
+--==============================================================
+
+if not recursive_execution then
+
+    local target =
+        chooseServer()
+
+    if not target then
+        print(
+            "[RecursiveHop] No unvisited servers remain."
+        )
+
+        destroyEveryPart()
+        showDone()
+
+        return
+    end
+
+    teleportToServer(target)
 
     return
 end
 
--- Recursive mode.
-while true do
-    -- Queue reinjection BEFORE initiating the teleport.
-    if not queueSelf() then
-        warn("[RecursiveHop] Could not queue reinjection.")
-        break
-    end
 
-    local target = chooseServer()
+--==============================================================
+-- RECURSIVE MODE
+--
+-- Important:
+-- The script DOES NOT manually call the queue function here.
+--
+-- queue_on_teleport is triggered from OnTeleport above.
+--
+-- That means:
+--
+--     TeleportToPlaceInstance()
+--             ↓
+--     OnTeleport fires
+--             ↓
+--     queue_on_teleport(loader)
+--             ↓
+--     teleport completes
+--             ↓
+--     loader executes
+--             ↓
+--     script starts again
+--
+--==============================================================
 
-    if not target then
-        print("[RecursiveHop] No unvisited servers remain.")
-        break
-    end
+local target =
+    chooseServer()
 
-    local targetJobId = tostring(target.id)
+if not target then
 
-    -- Mark the target before teleport so it cannot be selected again
-    -- if this process gets interrupted and resumed.
-    visited[targetJobId] = true
-    saveVisited()
+    print(
+        "[RecursiveHop] No unvisited servers remain."
+    )
 
-    print("[RecursiveHop] Next server:", targetJobId)
-    print("[RecursiveHop] Teleporting...")
+    destroyEveryPart()
+    showDone()
 
-    task.wait(TELEPORT_DELAY)
-
-    local teleportOk, teleportErr = pcall(function()
-        TeleportService:TeleportToPlaceInstance(
-            game.PlaceId,
-            targetJobId,
-            LocalPlayer
-        )
-    end)
-
-    if not teleportOk then
-        warn("[RecursiveHop] Teleport failed:", teleportErr)
-
-        -- Don't loop infinitely on a teleport failure.
-        -- The queued script will retry when another teleport happens.
-        break
-    end
-
-    -- Normally this script terminates here because the client is leaving
-    -- the current server. The queued copy starts again after arrival.
-    break
+    return
 end
 
---//==============================================================
---// EXHAUSTED
---//==============================================================
+local success =
+    teleportToServer(target)
 
-task.wait(1)
-
-destroyEveryPart()
-showDone()
-
-print("[RecursiveHop] done.")
+if not success then
+    warn(
+        "[RecursiveHop] Unable to teleport to selected server."
+    )
+end
